@@ -1,5 +1,7 @@
 import bpy
 import os
+from pathlib import Path
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +21,8 @@ class Globals:
     start_time = 0
     elapsed_time = 0
     seconds_per_frame = 0
+    declining_streak = 0
+    peak_throughput = 0
 
 
 def is_image_valid(filepath):
@@ -77,6 +81,18 @@ def cleanup_bench_dir():
         Globals.bench_temp_dir = ""
 
 
+def terminate_all_processes():
+    for proc in Globals.active_render_processes:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in Globals.active_render_processes:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    Globals.active_render_processes.clear()
+
+
 def check_render_status():
     for proc in Globals.active_render_processes[:]:
         if proc.poll() is not None:
@@ -90,13 +106,16 @@ def check_render_status():
 
         Globals.benchmark_results[Globals.current_bench_instances] = throughput
 
+        if throughput > Globals.peak_throughput:
+            Globals.peak_throughput = throughput
+            Globals.declining_streak = 0
+        else:
+            Globals.declining_streak += 1
+
         if (
             Globals.early_exit_benchmark
-            or Globals.current_bench_instances >= 32
-            or (
-                Globals.current_bench_instances > 2
-                and throughput < Globals.benchmark_results[1]
-            )
+            or Globals.current_bench_instances >= 16
+            or Globals.declining_streak >= 2
         ):
             best_count = max(
                 Globals.benchmark_results, key=Globals.benchmark_results.get
@@ -220,16 +239,12 @@ class RENDER_OT_cancel_pseudo_rendering_farm(bpy.types.Operator):
             self.report({"INFO"}, "No active processes found")
             return {"FINISHED"}
 
-        count = 0
-        for proc in Globals.active_render_processes:
-            if proc.poll() is None:
-                proc.terminate()
-                count += 1
-        Globals.early_exit_benchmark = True
+        count = len([p for p in Globals.active_render_processes if p.poll() is None])
+        if Globals.is_benchmarking:
+            Globals.early_exit_benchmark = True
         Globals.is_benchmarking = False
 
-        Globals.active_render_processes.clear()
-
+        terminate_all_processes()
         time.sleep(0.2)
         cleared = cleanup_corrupted_frames()
         cleanup_bench_dir()
@@ -256,19 +271,16 @@ def launch_benchmark_iteration(context):
     exe = bpy.app.binary_path
     blend = bpy.data.filepath
     scene = bpy.context.scene
-    Globals.benchmark_frames = (
-        min(scene.frame_end, 50) // Globals.current_bench_instances
-    )
-    Globals.benchmark_frames *= (
-        Globals.current_bench_instances
-    )  # Ensure that the amount of frames is divisible
+    frame_start = scene.frame_start
+    frame_end = scene.frame_end
+    available = frame_end - frame_start + 1
+    Globals.benchmark_frames = min(48, available)
 
     Globals.bench_status_msg = f"Testing {Globals.current_bench_instances} instances on {Globals.benchmark_frames} frames"
 
     out_path = os.path.join(
         Globals.bench_temp_dir, f"inst_{Globals.current_bench_instances}", "frame_"
     )
-    print(out_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     for _ in range(Globals.current_bench_instances):
         cmd = [
@@ -278,9 +290,9 @@ def launch_benchmark_iteration(context):
             "-o",
             out_path,
             "-s",
-            "1",
+            str(frame_start),
             "-e",
-            str(Globals.benchmark_frames),
+            str(frame_start + Globals.benchmark_frames - 1),
             "-a",
         ]
         Globals.active_render_processes.append(subprocess.Popen(cmd))
@@ -296,13 +308,28 @@ class RENDER_OT_benchmarking(bpy.types.Operator):
     bl_label = "Launch benchmark"
 
     def execute(self, context):
+        scene = context.scene
+        rd = scene.render
+
+        if rd.use_overwrite:
+            self.report({"ERROR"}, "Validation Failed: 'Overwrite' must be UNCHECKED")
+            return {"CANCELLED"}
+
+        if not rd.use_placeholder:
+            self.report({"ERROR"}, "Validation Failed: 'Placeholders' must be CHECKED")
+            return {"CANCELLED"}
+
         if not bpy.data.filepath:
             self.report({"ERROR"}, "Save file before benchmarking.")
             return {"CANCELLED"}
 
+        bpy.ops.wm.save_mainfile()
+
         Globals.is_benchmarking = True
         Globals.current_bench_instances = 1
         Globals.benchmark_results = {}
+        Globals.declining_streak = 0
+        Globals.peak_throughput = 0
         Globals.bench_temp_dir = tempfile.mkdtemp(prefix="blender_bench_")
 
         launch_benchmark_iteration(context)
@@ -312,6 +339,37 @@ class RENDER_OT_benchmarking(bpy.types.Operator):
 """
 UI
 """
+
+
+class RENDER_OT_open_folder(bpy.types.Operator):
+    """Open the folder with rendered data"""
+
+    bl_idname = "render.open_folder"
+    bl_label = "Open folder"
+
+    def sanitize(self, context):
+        frame_path = Path(
+            context.scene.render.frame_path(frame=context.scene.frame_current)
+        )
+        folder_path = frame_path.parent.absolute()
+        return folder_path
+
+    def execute(self, context):
+        render_path = self.sanitize(context)
+
+        if not os.path.exists(render_path):
+            print(f"Error: The folder '{render_path}' does not exist yet.")
+            return
+
+        current_os = platform.system()
+        if current_os == "Windows":
+            os.startfile(render_path)
+        elif current_os == "Darwin":
+            subprocess.run(["open", render_path])
+        else:
+            subprocess.run(["xdg-open", render_path])
+
+        return {"FINISHED"}
 
 
 class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
@@ -325,11 +383,10 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        for proc in Globals.active_render_processes[:]:
-            if proc.poll() is not None:
-                Globals.active_render_processes.remove(proc)
-
-        is_running = len(Globals.active_render_processes) > 0 or Globals.is_benchmarking
+        is_running = (
+            any(p.poll() is None for p in Globals.active_render_processes)
+            or Globals.is_benchmarking
+        )
         col = layout.column(align=True)
 
         sub_col = col.column()
@@ -343,6 +400,12 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         benchmark_row = row.row(align=True)
         benchmark_row.enabled = not is_running
         benchmark_row.operator("render.benchmarking", icon="SETTINGS")
+
+        row = col.row(align=True)
+        open_row = row.row(align=True)
+        open_row.operator(
+            "render.open_folder", icon="FILE_FOLDER", text="Open render folder"
+        )
 
         row = col.row(align=True)
         cancel_row = row.row(align=True)
@@ -372,6 +435,7 @@ classes = [
     RENDER_OT_pseudo_rendering_farm,
     RENDER_OT_cancel_pseudo_rendering_farm,
     RENDER_OT_benchmarking,
+    RENDER_OT_open_folder,
     RENDER_PT_pseudo_rendering_farm_panel,
 ]
 
@@ -379,7 +443,6 @@ classes = [
 def register():
     for c in classes:
         bpy.utils.register_class(c)
-    bpy.types.Scene.is_notifying = bpy.props.BoolProperty(default=False)
     bpy.types.Scene.pseudo_rendering_farm_instances = bpy.props.IntProperty(
         name="Instances", default=2, min=1, max=32
     )
@@ -389,7 +452,6 @@ def unregister():
     for c in classes:
         bpy.utils.unregister_class(c)
     del bpy.types.Scene.pseudo_rendering_farm_instances
-    del bpy.types.Scene.is_notifying
 
 
 if __name__ == "__main__":
