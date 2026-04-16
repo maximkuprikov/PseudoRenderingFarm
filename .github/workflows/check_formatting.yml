@@ -1,4 +1,4 @@
-name: Check formatting
+name: Test and pack
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [ "main" ]
 
 jobs:
-  lint-and-zip:
-    runs-on: ubuntu-latest
+  test-and-pack:
+    runs-on: macos-latest
     env:
       PROJECT_NAME: PseudoRenderingFarm
 
@@ -23,10 +23,18 @@ jobs:
         run: pip install black
       - name: Run Black Check
         run: black --check .
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@main
       - name: Install Blender
-        run: sudo snap install blender --classic
+        run: brew install blender
       - name: Build Blender Extension
         run: blender --command extension build
+      - name: Install dependencies
+        run: pip install pytest psutil
+      - name: Run Pytest
+        working-directory: ./tests
+        run: pytest -s test.py -x
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
         with:
