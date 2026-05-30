@@ -182,16 +182,24 @@ def terminate_all_processes():
 
 def update_render_progress(scene):
     """Counts completed frames and updates ETA. Called every timer tick."""
+    # Use the effective range stored at render start (respects custom range)
+    eff_total = Globals.frames_total
+    if eff_total == 0:
+        return
+
     output_prefix = scene.render.filepath
-    scan = scan_output_folder(scene.frame_start, scene.frame_end, output_prefix)
+    # Derive eff_start/eff_end from snapshot context stored in frames_total
+    # We scan the full scene range but filter by snapshot delta
+    scan = scan_output_folder(
+        scene.frame_start, scene.frame_end, output_prefix
+    )
 
     # Subtract frames that already existed before render started
     new_frames = scan["valid"] - Globals.snapshot_frames
     Globals.frames_done = len(new_frames)
-    Globals.frames_total = scan["total_expected"]
 
     elapsed = time.time() - Globals.start_time
-    remaining = Globals.frames_total - Globals.frames_done
+    remaining = eff_total - Globals.frames_done
 
     if elapsed > 3 and Globals.frames_done > 0:
         avg_spf = elapsed / Globals.frames_done  # seconds per frame
@@ -508,6 +516,17 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
         blend_path = bpy.data.filepath
         num_instances = scene.pseudo_rendering_farm_instances
 
+        # Resolve effective frame range
+        if scene.prf_use_custom_range:
+            eff_start = scene.prf_frame_start
+            eff_end = scene.prf_frame_end
+            if eff_start > eff_end:
+                self.report({"ERROR"}, "Custom Start frame must be <= End frame")
+                return {"CANCELLED"}
+        else:
+            eff_start = scene.frame_start
+            eff_end = scene.frame_end
+
         Globals.active_render_processes.clear()
         Globals.start_time = time.time()
         Globals.is_rendering_active = True
@@ -516,7 +535,7 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
 
         # Snapshot existing valid frames so we don't count them as new
         snap = scan_output_folder(
-            scene.frame_start, scene.frame_end, scene.render.filepath
+            eff_start, eff_end, scene.render.filepath
         )
         Globals.snapshot_frames = snap["valid"]
         Globals.frames_total = snap["total_expected"]
@@ -529,7 +548,7 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
             try:
                 if is_system_balanced():
                     subrange = get_worker_subrange(
-                        scene.frame_start, scene.frame_end, num_instances, i
+                        eff_start, eff_end, num_instances, i
                     )
                     if not subrange:
                         continue
@@ -654,6 +673,52 @@ class RENDER_OT_benchmarking(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# --- Custom range auto-detect ---
+
+
+class RENDER_OT_autodetect_start_frame(bpy.types.Operator):
+    """Scan output folder and set Start to the first missing frame in range"""
+
+    bl_idname = "render.prf_autodetect_start"
+    bl_label = "Auto-detect from folder"
+
+    def execute(self, context):
+        scene = context.scene
+        frame_start = scene.frame_start
+        frame_end = scene.frame_end
+
+        scan = scan_output_folder(frame_start, frame_end, scene.render.filepath)
+        valid = scan["valid"]
+
+        if not valid:
+            # Nothing rendered yet — start from the beginning
+            scene.prf_frame_start = frame_start
+            scene.prf_frame_end = frame_end
+            self.report({"INFO"}, f"No rendered frames found. Starting from {frame_start}")
+            return {"FINISHED"}
+
+        # Find the first frame in range that is missing
+        first_missing = None
+        for f in range(frame_start, frame_end + 1):
+            if f not in valid:
+                first_missing = f
+                break
+
+        if first_missing is None:
+            self.report({"INFO"}, "All frames already rendered!")
+            scene.prf_frame_start = frame_end
+            scene.prf_frame_end = frame_end
+        else:
+            scene.prf_frame_start = first_missing
+            scene.prf_frame_end = frame_end
+            self.report(
+                {"INFO"},
+                f"Found {len(valid)} existing frames. Resuming from frame {first_missing}",
+            )
+
+        return {"FINISHED"}
+
+
 # --- Multi-GPU setup ---
 
 
@@ -727,6 +792,21 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         sub_col = col.column()
         sub_col.enabled = not is_running
         sub_col.prop(scene, "pseudo_rendering_farm_instances", text="Instances")
+
+        # Custom frame range
+        range_col = col.column(align=True)
+        range_col.enabled = not is_running
+        range_col.prop(scene, "prf_use_custom_range")
+        if scene.prf_use_custom_range:
+            range_row = range_col.row(align=True)
+            range_row.prop(scene, "prf_frame_start", text="Start")
+            range_row.prop(scene, "prf_frame_end", text="End")
+            range_col.operator(
+                "render.prf_autodetect_start",
+                icon="VIEWZOOM",
+                text="Auto-detect from folder",
+            )
+
         row = col.row(align=True)
 
         launch_row = row.row(align=True)
@@ -806,6 +886,7 @@ classes = [
     RENDER_OT_pseudo_rendering_farm,
     RENDER_OT_cancel_pseudo_rendering_farm,
     RENDER_OT_benchmarking,
+    RENDER_OT_autodetect_start_frame,
     RENDER_OT_setup_multi_gpu,
     RENDER_OT_open_folder,
     RENDER_PT_pseudo_rendering_farm_panel,
@@ -818,6 +899,21 @@ def register():
     bpy.types.Scene.pseudo_rendering_farm_instances = bpy.props.IntProperty(
         name="Instances", default=2, min=1, max=32
     )
+    bpy.types.Scene.prf_use_custom_range = bpy.props.BoolProperty(
+        name="Custom Frame Range",
+        description="Override scene frame range for this render",
+        default=False,
+    )
+    bpy.types.Scene.prf_frame_start = bpy.props.IntProperty(
+        name="Start",
+        description="Custom start frame",
+        default=1, min=0,
+    )
+    bpy.types.Scene.prf_frame_end = bpy.props.IntProperty(
+        name="End",
+        description="Custom end frame",
+        default=250, min=0,
+    )
     detect_gpus()
 
 
@@ -826,6 +922,9 @@ def unregister():
     for c in classes:
         bpy.utils.unregister_class(c)
     del bpy.types.Scene.pseudo_rendering_farm_instances
+    del bpy.types.Scene.prf_use_custom_range
+    del bpy.types.Scene.prf_frame_start
+    del bpy.types.Scene.prf_frame_end
 
 
 if __name__ == "__main__":
