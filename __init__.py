@@ -112,7 +112,7 @@ def is_image_valid(filepath):
             elif ext == ".exr":
                 return os.path.getsize(filepath) > 1000
     except Exception as e:
-        print(f"PseudoRenderingFarm: Error checking {filepath}: {e}")
+        print(f"PseudoRenderingFarmEX: Error checking {filepath}: {e}")
         return False
 
     return True
@@ -135,7 +135,7 @@ def cleanup_corrupted_frames():
                     os.remove(file_path)
                     deleted_count += 1
                 except Exception as e:
-                    print(f"PseudoRenderingFarm: Failed to delete {filename}: {e}")
+                    print(f"PseudoRenderingFarmEX: Failed to delete {filename}: {e}")
 
     return deleted_count
 
@@ -201,7 +201,7 @@ def check_render_status():
                     icon="CHECKMARK",
                 )
 
-            print("PseudoRenderingFarm: !!! Benchmarking stats for nerds !!!")
+            print("PseudoRenderingFarmEX: !!! Benchmarking stats for nerds !!!")
             print(Globals.benchmark_results)
 
             if not bpy.app.background:
@@ -272,7 +272,7 @@ def detect_gpus():
             platform.system() != "Darwin"
             and "VULKAN" not in bpy.context.preferences.system.gpu_backend
         ):
-            print("PseudoRenderingFarm: Non-Vulkan backend, multi-GPU not available")
+            print("PseudoRenderingFarmEX: Non-Vulkan backend, multi-GPU not available")
             return
         try:
             bpy.context.preferences.system.gpu_preferred_device = "___invalid___"
@@ -281,7 +281,7 @@ def detect_gpus():
                 d for d in re.findall(r"'([^']+)'", str(e)) if d != "AUTO"
             ]
     except Exception as e:
-        print(f"PseudoRenderingFarm: GPU detection failed: {e}")
+        print(f"PseudoRenderingFarmEX: GPU detection failed: {e}")
 
 
 def setup_multi_gpu():
@@ -653,8 +653,8 @@ class RENDER_OT_open_folder(bpy.types.Operator):
 
 
 class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
-    bl_label = "Pseudo Rendering Farm"
-    bl_idname = "RENDER_PT_pseudo_rendering_farm"
+    bl_label = "Pseudo Rendering Farm EX"
+    bl_idname = "RENDER_PT_pseudo_rendering_farm_ex"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "render"
