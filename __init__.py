@@ -772,6 +772,118 @@ class RENDER_OT_autodetect_start_frame(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# --- Output folder management ---
+
+
+class RENDER_OT_clear_output_folder(bpy.types.Operator):
+    """Delete all valid rendered frames in the current output folder for the active range"""
+
+    bl_idname = "render.prf_clear_output"
+    bl_label = "Clear Output Folder"
+
+    _frames_found: int = 0
+
+    def invoke(self, context, event):
+        scene = context.scene
+        eff_start = scene.prf_frame_start if scene.prf_use_custom_range else scene.frame_start
+        eff_end = scene.prf_frame_end if scene.prf_use_custom_range else scene.frame_end
+
+        scan = scan_output_folder(eff_start, eff_end, scene.render.filepath)
+        self._frames_found = len(scan["valid"])
+
+        if self._frames_found == 0:
+            self.report({"INFO"}, "No rendered frames found in output folder")
+            return {"CANCELLED"}
+
+        return context.window_manager.invoke_props_dialog(self, width=420, title="Clear Output Folder")
+
+    def draw(self, context):
+        scene = context.scene
+        eff_start = scene.prf_frame_start if scene.prf_use_custom_range else scene.frame_start
+        eff_end = scene.prf_frame_end if scene.prf_use_custom_range else scene.frame_end
+
+        layout = self.layout
+        layout.label(
+            text=f"{self._frames_found} frame(s) in range {eff_start}\u2013{eff_end} will be permanently deleted.",
+            icon="ERROR",
+        )
+        layout.label(text="This cannot be undone. Press OK to confirm.")
+
+    def execute(self, context):
+        scene = context.scene
+        eff_start = scene.prf_frame_start if scene.prf_use_custom_range else scene.frame_start
+        eff_end = scene.prf_frame_end if scene.prf_use_custom_range else scene.frame_end
+
+        scan = scan_output_folder(eff_start, eff_end, scene.render.filepath)
+        output_dir = os.path.dirname(bpy.path.abspath(scene.render.filepath))
+        output_prefix = scene.render.filepath
+        deleted = 0
+
+        for filename in os.listdir(output_dir):
+            file_path = os.path.join(output_dir, filename)
+            if not os.path.isfile(file_path):
+                continue
+            frame_num = get_frame_number_from_filename(filename, output_prefix)
+            if frame_num is None:
+                continue
+            if eff_start <= frame_num <= eff_end:
+                try:
+                    os.remove(file_path)
+                    deleted += 1
+                except Exception as e:
+                    print(f"PseudoRenderingFarmEX: Failed to delete {filename}: {e}")
+
+        self.report({"INFO"}, f"Deleted {deleted} frame(s) from output folder")
+        return {"FINISHED"}
+
+
+class RENDER_OT_set_output_subfolder(bpy.types.Operator):
+    """Append a version suffix to the output path (e.g. /frames/ -> /frames_v2/)"""
+
+    bl_idname = "render.prf_set_output_subfolder"
+    bl_label = "Apply Version Suffix"
+
+    def execute(self, context):
+        scene = context.scene
+        suffix = scene.prf_output_suffix.strip()
+
+        if not suffix:
+            self.report({"ERROR"}, "Version suffix is empty")
+            return {"CANCELLED"}
+
+        current = bpy.path.abspath(scene.render.filepath)
+        # Strip trailing slash to work with the path cleanly
+        current_stripped = current.rstrip("/\\") 
+        new_path = current_stripped + suffix + os.sep
+
+        # Store original path for restore if not already saved
+        if not scene.prf_original_output:
+            scene.prf_original_output = scene.render.filepath
+
+        scene.render.filepath = new_path
+        os.makedirs(new_path, exist_ok=True)
+        self.report({"INFO"}, f"Output path set to: {new_path}")
+        return {"FINISHED"}
+
+
+class RENDER_OT_restore_output_path(bpy.types.Operator):
+    """Restore the original output path before the version suffix was applied"""
+
+    bl_idname = "render.prf_restore_output"
+    bl_label = "Restore Original Path"
+
+    def execute(self, context):
+        scene = context.scene
+        if not scene.prf_original_output:
+            self.report({"INFO"}, "No original path saved")
+            return {"CANCELLED"}
+
+        scene.render.filepath = scene.prf_original_output
+        scene.prf_original_output = ""
+        self.report({"INFO"}, f"Output path restored to: {scene.render.filepath}")
+        return {"FINISHED"}
+
+
 # --- Multi-GPU setup ---
 
 
@@ -860,6 +972,30 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
                 text="Auto-detect from folder",
             )
 
+        # Output folder management
+        layout.separator()
+        folder_col = layout.column(align=True)
+        folder_col.enabled = not is_running
+        folder_col.label(text="Output Folder:", icon="FILE_FOLDER")
+
+        # Version suffix row
+        suffix_row = folder_col.row(align=True)
+        suffix_row.prop(scene, "prf_output_suffix", text="Suffix")
+        suffix_row.operator("render.prf_set_output_subfolder", text="Apply", icon="ADD")
+
+        # Restore button — only shown if a suffix is currently active
+        if scene.prf_original_output:
+            restore_row = folder_col.row(align=True)
+            restore_row.label(text=f"Active: ...{os.path.basename(scene.render.filepath.rstrip(os.sep))}", icon="CHECKMARK")
+            restore_row.operator("render.prf_restore_output", text="Restore", icon="LOOP_BACK")
+
+        # Clear button
+        folder_col.operator(
+            "render.prf_clear_output",
+            text="Clear Output Folder",
+            icon="TRASH",
+        )
+
         row = col.row(align=True)
 
         launch_row = row.row(align=True)
@@ -922,7 +1058,7 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
 
             if Globals.eta_seconds > 0:
                 layout.label(
-                    text=f"ETA: {format_time(Globals.eta_seconds)}",
+                    text=f"Remaining: {format_time(Globals.eta_seconds)}",
                     icon="SORTTIME",
                 )
         else:
@@ -940,6 +1076,9 @@ classes = [
     RENDER_OT_cancel_pseudo_rendering_farm,
     RENDER_OT_benchmarking,
     RENDER_OT_autodetect_start_frame,
+    RENDER_OT_clear_output_folder,
+    RENDER_OT_set_output_subfolder,
+    RENDER_OT_restore_output_path,
     RENDER_OT_setup_multi_gpu,
     RENDER_OT_open_folder,
     RENDER_PT_pseudo_rendering_farm_panel,
@@ -967,6 +1106,16 @@ def register():
         description="Custom end frame",
         default=250, min=0,
     )
+    bpy.types.Scene.prf_output_suffix = bpy.props.StringProperty(
+        name="Version Suffix",
+        description="Suffix to append to output path (e.g. _v2, _test)",
+        default="_v2",
+    )
+    bpy.types.Scene.prf_original_output = bpy.props.StringProperty(
+        name="Original Output Path",
+        description="Saved original output path before suffix was applied",
+        default="",
+    )
     detect_gpus()
 
 
@@ -978,6 +1127,8 @@ def unregister():
     del bpy.types.Scene.prf_use_custom_range
     del bpy.types.Scene.prf_frame_start
     del bpy.types.Scene.prf_frame_end
+    del bpy.types.Scene.prf_output_suffix
+    del bpy.types.Scene.prf_original_output
 
 
 if __name__ == "__main__":
