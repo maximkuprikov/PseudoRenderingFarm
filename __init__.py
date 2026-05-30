@@ -41,6 +41,58 @@ class Globals:
     gpu_config_dir = ""
 
 
+def get_frame_number_from_filename(filename, output_prefix):
+    """Extracts frame number from a rendered filename.
+    Blender names files like 'prefix0001.png', 'prefix0042.exr', etc.
+    Returns the frame number as int, or None if not recognized."""
+    basename = os.path.basename(filename)
+    name_no_ext = os.path.splitext(basename)[0]
+
+    # Strip the output prefix (e.g. 'frame_' from 'frame_0001')
+    prefix_basename = os.path.basename(output_prefix.rstrip("/\\"))
+    if prefix_basename and name_no_ext.startswith(prefix_basename):
+        remainder = name_no_ext[len(prefix_basename):]
+    else:
+        remainder = name_no_ext
+
+    # The remainder should be a zero-padded number
+    if remainder.isdigit():
+        return int(remainder)
+    return None
+
+
+def scan_output_folder(frame_start, frame_end, output_prefix):
+    """Scans the render output folder and returns info about existing frames.
+
+    Returns a dict with:
+      - 'valid': set of frame numbers that are complete and valid
+      - 'total_expected': total number of frames in the range
+      - 'output_dir': the directory that was scanned
+    """
+    output_dir = os.path.dirname(bpy.path.abspath(output_prefix))
+    result = {
+        "valid": set(),
+        "total_expected": frame_end - frame_start + 1,
+        "output_dir": output_dir,
+    }
+
+    if not os.path.exists(output_dir):
+        return result
+
+    for filename in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, filename)
+        if not os.path.isfile(file_path):
+            continue
+        frame_num = get_frame_number_from_filename(filename, output_prefix)
+        if frame_num is None:
+            continue
+        if frame_start <= frame_num <= frame_end:
+            if is_image_valid(file_path):
+                result["valid"].add(frame_num)
+
+    return result
+
+
 def is_image_valid(filepath):
     """Checks if an image file is complete by looking for format-specific footers."""
     if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
