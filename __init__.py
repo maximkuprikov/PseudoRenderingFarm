@@ -603,7 +603,8 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
             bpy.app.timers.register(check_render_status)
 
         for i in range(num_instances):
-            cmd = [blender_exe, "--factory-startup", "--disable-autoexec", "-b", blend_path, "-a"]
+            factory = ["--factory-startup", "--disable-autoexec"] if scene.prf_load_user_addons else []
+            cmd = [blender_exe] + factory + ["-b", blend_path, "-a"]
             try:
                 if is_system_balanced():
                     subrange = get_worker_subrange(
@@ -686,7 +687,8 @@ def launch_benchmark_iteration(context):
     )
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     for i in range(Globals.current_bench_instances):
-        cmd = [blender_exe, "--factory-startup", "--disable-autoexec", "-b", blend_path, "-o", out_path, "-a"]
+        factory = ["--factory-startup", "--disable-autoexec"] if bpy.context.scene.prf_load_user_addons else []
+        cmd = [blender_exe] + factory + ["-b", blend_path, "-o", out_path, "-a"]
         if is_system_balanced():
             subrange = get_worker_subrange(
                 scene.frame_start,
@@ -787,6 +789,28 @@ class RENDER_OT_autodetect_start_frame(bpy.types.Operator):
                 f"Found {len(valid)} existing frames. Resuming from frame {first_missing}",
             )
 
+        return {"FINISHED"}
+
+
+# --- Output path selector ---
+
+
+class RENDER_OT_set_project_output(bpy.types.Operator):
+    """Set render output to a 'render' subfolder next to the saved .blend file"""
+
+    bl_idname = "render.prf_set_project_output"
+    bl_label = "Set to project folder"
+
+    def execute(self, context):
+        if not bpy.data.filepath:
+            self.report({"ERROR"}, "Save the project first")
+            return {"CANCELLED"}
+
+        blend_dir = os.path.dirname(bpy.path.abspath(bpy.data.filepath))
+        render_dir = os.path.join(blend_dir, "render", "")
+        context.scene.render.filepath = render_dir
+        os.makedirs(render_dir, exist_ok=True)
+        self.report({"INFO"}, f"Output set to: {render_dir}")
         return {"FINISHED"}
 
 
@@ -975,6 +999,7 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         sub_col = col.column()
         sub_col.enabled = not is_running
         sub_col.prop(scene, "pseudo_rendering_farm_instances", text="Instances")
+        sub_col.prop(scene, "prf_load_user_addons")
 
         # Custom frame range
         range_col = col.column(align=True)
@@ -996,6 +1021,14 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         folder_col.enabled = not is_running
         folder_col.label(text="Output Folder:", icon="FILE_FOLDER")
 
+        # Output path field + project button
+        path_row = folder_col.row(align=True)
+        path_row.prop(scene.render, "filepath", text="")
+        path_row.operator(
+            "render.prf_set_project_output",
+            text="",
+            icon="FILE_BLEND",
+        )
         # Version suffix row
         suffix_row = folder_col.row(align=True)
         suffix_row.prop(scene, "prf_output_suffix", text="Suffix")
@@ -1094,6 +1127,7 @@ classes = [
     RENDER_OT_cancel_pseudo_rendering_farm,
     RENDER_OT_benchmarking,
     RENDER_OT_autodetect_start_frame,
+    RENDER_OT_set_project_output,
     RENDER_OT_clear_output_folder,
     RENDER_OT_set_output_subfolder,
     RENDER_OT_restore_output_path,
@@ -1134,6 +1168,11 @@ def register():
         description="Saved original output path before suffix was applied",
         default="",
     )
+    bpy.types.Scene.prf_load_user_addons = bpy.props.BoolProperty(
+        name="Load user add-ons in background",
+        description="Pass --factory-startup to background instances (faster, lower memory). Disable only if your scene requires a specific add-on during render (e.g. a custom exporter or geometry node add-on)",
+        default=True,
+    )
     detect_gpus()
 
 
@@ -1147,6 +1186,7 @@ def unregister():
     del bpy.types.Scene.prf_frame_end
     del bpy.types.Scene.prf_output_suffix
     del bpy.types.Scene.prf_original_output
+    del bpy.types.Scene.prf_load_user_addons
 
 
 if __name__ == "__main__":
