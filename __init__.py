@@ -994,12 +994,14 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             any(p.poll() is None for p in Globals.active_render_processes)
             or Globals.is_benchmarking
         )
-        col = layout.column(align=True)
+        col = layout.column(align=False)
 
-        sub_col = col.column()
+        sub_col = col.column(align=True)
         sub_col.enabled = not is_running
         sub_col.prop(scene, "pseudo_rendering_farm_instances", text="Instances")
         sub_col.prop(scene, "prf_load_user_addons")
+
+        col.separator()
 
         # Custom frame range
         range_col = col.column(align=True)
@@ -1009,14 +1011,16 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             range_row = range_col.row(align=True)
             range_row.prop(scene, "prf_frame_start", text="Start")
             range_row.prop(scene, "prf_frame_end", text="End")
+            range_col.separator(factor=0.5)
             range_col.operator(
                 "render.prf_autodetect_start",
                 icon="VIEWZOOM",
                 text="Auto-detect from folder",
             )
 
-        # Output folder management
         col.separator()
+
+        # Output folder management
         folder_col = col.column(align=True)
         folder_col.enabled = not is_running
         folder_col.label(text="Output Folder:", icon="FILE_FOLDER")
@@ -1029,6 +1033,8 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             text="",
             icon="FILE_BLEND",
         )
+
+        folder_col.separator(factor=0.5)
 
         # Version suffix row
         suffix_row = folder_col.row(align=True)
@@ -1044,6 +1050,8 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             )
             restore_row.operator("render.prf_restore_output", text="Restore", icon="LOOP_BACK")
 
+        folder_col.separator(factor=0.5)
+
         # Clear frames button
         folder_col.operator(
             "render.prf_clear_output",
@@ -1053,6 +1061,7 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
 
         col.separator()
 
+        # Launch / Benchmark
         row = col.row(align=True)
         launch_row = row.row(align=True)
         launch_row.enabled = not is_running
@@ -1061,20 +1070,25 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         benchmark_row.enabled = not is_running
         benchmark_row.operator("render.benchmarking", icon="SETTINGS")
 
-        row = col.row(align=True)
-        open_row = row.row(align=True)
+        col.separator(factor=0.5)
+
+        # Open folder
+        open_row = col.row(align=True)
         open_row.operator(
             "render.open_folder", icon="FILE_FOLDER", text="Open render folder"
         )
 
         if len(Globals.gpu_devices) > 1:
             if not Globals.gpu_configured:
+                col.separator(factor=0.5)
                 gpu_row = col.row(align=True)
                 gpu_row.enabled = not is_running and not Globals.gpu_detection_active
                 gpu_row.operator("render.setup_multi_gpu", icon="LIGHT")
 
-        row = col.row(align=True)
-        cancel_row = row.row(align=True)
+        col.separator(factor=0.5)
+
+        # Stop button
+        cancel_row = col.row(align=True)
         cancel_row.enabled = is_running
         cancel_row.operator(
             "render.cancel_pseudo_rendering_farm", icon="X", text="Stop"
@@ -1082,7 +1096,8 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
 
         if len(Globals.gpu_devices) > 1:
             if Globals.gpu_configured:
-                layout.label(
+                col.separator(factor=0.5)
+                col.label(
                     text=f"Multi-GPU: {len(Globals.gpu_devices)} devices",
                     icon="PREFERENCES",
                 )
