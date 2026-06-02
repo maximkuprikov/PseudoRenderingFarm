@@ -1,4 +1,4 @@
-# Pseudo rendering farm for Blender
+# Parallel Render for Blender
 
 A small script to leverage parallel rendering in Blender on a single machine
 
