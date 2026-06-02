@@ -132,7 +132,7 @@ def is_image_valid(filepath):
             elif ext == ".exr":
                 return os.path.getsize(filepath) > 1000
     except Exception as e:
-        print(f"PseudoRenderingFarmEX: Error checking {filepath}: {e}")
+        print(f"ParallelRender: Error checking {filepath}: {e}")
         return False
 
     return True
@@ -155,7 +155,7 @@ def cleanup_corrupted_frames():
                     os.remove(file_path)
                     deleted_count += 1
                 except Exception as e:
-                    print(f"PseudoRenderingFarmEX: Failed to delete {filename}: {e}")
+                    print(f"ParallelRender: Failed to delete {filename}: {e}")
 
     return deleted_count
 
@@ -249,7 +249,7 @@ def check_render_status():
                     icon="CHECKMARK",
                 )
 
-            print("PseudoRenderingFarmEX: !!! Benchmarking stats for nerds !!!")
+            print("ParallelRender: !!! Benchmarking stats for nerds !!!")
             print(Globals.benchmark_results)
 
             if not bpy.app.background:
@@ -303,7 +303,7 @@ def check_render_status():
         if not bpy.app.background:
             bpy.context.window_manager.popup_menu(
                 draw_popup,
-                title="Pseudo Rendering Farm Complete",
+                title="Parallel Render — Complete",
                 icon="RENDER_ANIMATION",
             )
             for window in bpy.context.window_manager.windows:
@@ -337,7 +337,7 @@ def detect_gpus():
             platform.system() != "Darwin"
             and "VULKAN" not in bpy.context.preferences.system.gpu_backend
         ):
-            print("PseudoRenderingFarmEX: Non-Vulkan backend, multi-GPU not available")
+            print("ParallelRender: Non-Vulkan backend, multi-GPU not available")
             return
         try:
             bpy.context.preferences.system.gpu_preferred_device = "___invalid___"
@@ -346,7 +346,7 @@ def detect_gpus():
                 d for d in re.findall(r"'([^']+)'", str(e)) if d != "AUTO"
             ]
     except Exception as e:
-        print(f"PseudoRenderingFarmEX: GPU detection failed: {e}")
+        print(f"ParallelRender: GPU detection failed: {e}")
 
 
 def setup_multi_gpu():
@@ -456,7 +456,7 @@ def get_factory_startup_env():
         try:
             shutil.copy2(Globals.userpref_path, dst)
         except Exception as e:
-            print(f"PseudoRenderingFarmEX: Could not copy userpref.blend: {e}")
+            print(f"ParallelRender: Could not copy userpref.blend: {e}")
             return os.environ.copy()
 
     env = os.environ.copy()
@@ -1015,8 +1015,8 @@ class RENDER_OT_open_folder(bpy.types.Operator):
 
 
 class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
-    bl_label = "Pseudo Rendering Farm EX"
-    bl_idname = "RENDER_PT_pseudo_rendering_farm_ex"
+    bl_label = "Parallel Render"
+    bl_idname = "RENDER_PT_parallel_render"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "render"

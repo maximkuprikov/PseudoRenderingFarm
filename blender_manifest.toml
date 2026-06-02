@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 
-id = "pseudo_rendering_farm_ex"
+id = "parallel_render_for_blender"
 version = "1.1.1-ex"
-name = "Pseudo Rendering Farm EX"
+name = "Parallel Render"
 tagline = "Spawns multiple background processes to render the current file (extended fork)"
 maintainer = "Maxim Kuprikov (fork); original by Michael Klimenko"
 type = "add-on"
