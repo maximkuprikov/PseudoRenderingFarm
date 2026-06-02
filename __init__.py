@@ -1016,12 +1016,12 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             )
 
         # Output folder management
-        layout.separator()
-        folder_col = layout.column(align=True)
+        col.separator()
+        folder_col = col.column(align=True)
         folder_col.enabled = not is_running
         folder_col.label(text="Output Folder:", icon="FILE_FOLDER")
 
-        # Output path field + project button
+        # Output path field + project folder button
         path_row = folder_col.row(align=True)
         path_row.prop(scene.render, "filepath", text="")
         path_row.operator(
@@ -1029,6 +1029,7 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
             text="",
             icon="FILE_BLEND",
         )
+
         # Version suffix row
         suffix_row = folder_col.row(align=True)
         suffix_row.prop(scene, "prf_output_suffix", text="Suffix")
@@ -1037,18 +1038,22 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
         # Restore button — only shown if a suffix is currently active
         if scene.prf_original_output:
             restore_row = folder_col.row(align=True)
-            restore_row.label(text=f"Active: ...{os.path.basename(scene.render.filepath.rstrip(os.sep))}", icon="CHECKMARK")
+            restore_row.label(
+                text=f"Active: ...{os.path.basename(scene.render.filepath.rstrip(os.sep))}",
+                icon="CHECKMARK",
+            )
             restore_row.operator("render.prf_restore_output", text="Restore", icon="LOOP_BACK")
 
-        # Clear button
+        # Clear frames button
         folder_col.operator(
             "render.prf_clear_output",
             text="Clear Output Folder",
             icon="TRASH",
         )
 
-        row = col.row(align=True)
+        col.separator()
 
+        row = col.row(align=True)
         launch_row = row.row(align=True)
         launch_row.enabled = not is_running
         launch_row.operator("render.pseudo_rendering_farm", icon="RENDER_ANIMATION")
