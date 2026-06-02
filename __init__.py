@@ -35,6 +35,7 @@ class Globals:
     gpu_detection_active = False
     userpref_process = None
     userpref_path = ""
+    userpref_dir = ""  # temp dir with userpref.blend for factory-startup instances
 
     dummy_scene_process = None
 
@@ -426,6 +427,7 @@ def setup_multi_gpu():
 
 
 def cleanup_gpu_config():
+    cleanup_userpref_dir()
     if Globals.gpu_config_dir and os.path.exists(Globals.gpu_config_dir):
         try:
             shutil.rmtree(Globals.gpu_config_dir)
@@ -438,6 +440,37 @@ def get_env_for_instance(index):
     if not Globals.gpu_devices_envs:
         Globals.gpu_devices_envs = [os.environ.copy()]
     return Globals.gpu_devices_envs[index % len(Globals.gpu_devices_envs)]
+
+
+def get_factory_startup_env():
+    """Returns an env dict with BLENDER_USER_CONFIG pointing to a temp dir
+    that contains only userpref.blend. This lets --factory-startup skip all
+    user add-ons but still inherit GPU/device preferences."""
+    if not Globals.userpref_path:
+        # userpref.blend not found yet — fall back to normal env
+        return os.environ.copy()
+
+    if not Globals.userpref_dir:
+        Globals.userpref_dir = tempfile.mkdtemp(prefix="prf_userpref_")
+        dst = os.path.join(Globals.userpref_dir, "userpref.blend")
+        try:
+            shutil.copy2(Globals.userpref_path, dst)
+        except Exception as e:
+            print(f"PseudoRenderingFarmEX: Could not copy userpref.blend: {e}")
+            return os.environ.copy()
+
+    env = os.environ.copy()
+    env["BLENDER_USER_CONFIG"] = Globals.userpref_dir
+    return env
+
+
+def cleanup_userpref_dir():
+    if Globals.userpref_dir and os.path.exists(Globals.userpref_dir):
+        try:
+            shutil.rmtree(Globals.userpref_dir)
+        except Exception:
+            pass
+        Globals.userpref_dir = ""
 
 
 def get_process_priority_kwargs():
@@ -605,6 +638,7 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
         for i in range(num_instances):
             factory = ["--factory-startup", "--disable-autoexec"] if scene.prf_load_user_addons else []
             cmd = [blender_exe] + factory + ["-b", blend_path, "-a"]
+            instance_env = get_factory_startup_env() if scene.prf_load_user_addons else get_env_for_instance(i)
             try:
                 if is_system_balanced():
                     subrange = get_worker_subrange(
@@ -621,7 +655,7 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
                 Globals.active_render_processes.append(
                     subprocess.Popen(
                         cmd,
-                        env=get_env_for_instance(i),
+                        env=instance_env,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         **get_process_priority_kwargs(),
@@ -689,6 +723,7 @@ def launch_benchmark_iteration(context):
     for i in range(Globals.current_bench_instances):
         factory = ["--factory-startup", "--disable-autoexec"] if bpy.context.scene.prf_load_user_addons else []
         cmd = [blender_exe] + factory + ["-b", blend_path, "-o", out_path, "-a"]
+        instance_env = get_factory_startup_env() if bpy.context.scene.prf_load_user_addons else get_env_for_instance(i)
         if is_system_balanced():
             subrange = get_worker_subrange(
                 scene.frame_start,
@@ -708,7 +743,7 @@ def launch_benchmark_iteration(context):
         Globals.active_render_processes.append(
             subprocess.Popen(
                 cmd,
-                env=get_env_for_instance(i),
+                env=instance_env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 **get_process_priority_kwargs(),
