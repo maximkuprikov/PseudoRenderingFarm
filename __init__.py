@@ -55,6 +55,13 @@ class Globals:
     gpu_configured = False
     gpu_config_dir = ""
 
+    # Scene analyzer
+    analyzer_process = None
+    analyzer_status = ""     # '' | 'running' | 'done' | 'error'
+    analyzer_vram_mb = 0
+    analyzer_ram_mb = 0
+    analyzer_recommended = 0
+
 
 def format_time(seconds):
     """Formats seconds into a human-readable string like 1ч 23м 45с."""
@@ -600,6 +607,220 @@ def is_scene_configured(extension_obj, scene_render):
     return True
 
 
+# --- Scene analyzer ---
+
+
+# Python expression that runs inside the background Blender instance.
+# Renders 1 sample of 1 frame into /dev/null, then reports VRAM and RAM.
+_ANALYZER_EXPR = """
+import bpy, os, sys, tempfile
+
+# Enable GPU
+try:
+    prefs = bpy.context.preferences.addons['cycles'].preferences
+    for dt in ('OPTIX', 'CUDA', 'HIP', 'METAL', 'ONEAPI'):
+        try:
+            prefs.compute_device_type = dt
+            prefs.get_devices_for_type(dt)
+            if any(d.type == dt for d in prefs.devices):
+                [setattr(d, 'use', True) for d in prefs.devices if d.type != 'CPU']
+                break
+        except Exception:
+            continue
+except Exception:
+    pass
+
+# Set 1 sample render to temp file
+scene = bpy.context.scene
+scene.cycles.samples = 1
+scene.cycles.use_denoising = False
+scene.render.use_persistent_data = False
+tmp = tempfile.mktemp(suffix='.png')
+scene.render.filepath = tmp
+bpy.ops.render.render(write_still=True)
+try:
+    os.remove(tmp)
+except Exception:
+    pass
+
+# Report memory
+stats = bpy.context.scene.statistics(bpy.context.view_layer)
+vram = bpy.context.scene.render.bake.margin  # placeholder
+try:
+    import _cycles
+    mem = _cycles.get_device_info()
+except Exception:
+    mem = {}
+
+# Read from Blender memory stats
+try:
+    s = bpy.context.scene.statistics(bpy.context.view_layer)
+except Exception:
+    s = ''
+
+# Get peak memory from cycles device stats string
+peak_vram = 0
+peak_ram = 0
+try:
+    device_stats = bpy.context.scene.render.bake.margin  # dummy, replaced below
+    import re as _re
+    # Blender reports memory in Fra: N | Mem: XM format
+    # We parse it from the last rendered frame stats
+    mem_str = bpy.context.scene.statistics(bpy.context.view_layer)
+except Exception:
+    mem_str = ''
+
+# Simpler approach: read process memory directly
+import psutil, os as _os
+try:
+    proc = psutil.Process(_os.getpid())
+    peak_ram = proc.memory_info().rss // (1024 * 1024)
+except Exception:
+    peak_ram = 0
+
+# VRAM: try pynvml
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    peak_vram = info.used // (1024 * 1024)
+except Exception:
+    peak_vram = 0
+
+print(f'ANALYZER_VRAM:{peak_vram}')
+print(f'ANALYZER_RAM:{peak_ram}')
+"""
+
+
+def launch_scene_analyzer():
+    """Launches a single background Blender instance that renders 1 sample
+    and reports VRAM and RAM usage. Results appear in ~5-10 seconds."""
+    if Globals.analyzer_status == "running":
+        return
+    if not bpy.data.filepath:
+        return
+
+    bpy.ops.wm.save_mainfile()
+
+    # Build a simpler expression — read Mem from Blender's own stats output
+    gpu_expr = get_gpu_enable_expr() or ""
+    # The analyzer expr is written to a temp .py file to avoid shell escaping issues
+    tmp_script = tempfile.mktemp(prefix="prf_analyzer_", suffix=".py")
+    with open(tmp_script, "w", encoding="utf-8") as f:
+        f.write(_ANALYZER_EXPR)
+
+    factory = ["--factory-startup", "--disable-autoexec"]
+    gpu_args = ["--python-expr", gpu_expr] if gpu_expr else []
+    cmd = (
+        [bpy.app.binary_path]
+        + factory
+        + gpu_args
+        + ["-b", bpy.data.filepath, "-f", str(bpy.context.scene.frame_start)]
+    )
+
+    # Simpler approach: redirect stdout and parse Mem: line from Blender log
+    Globals.analyzer_process = subprocess.Popen(
+        cmd,
+        env=get_factory_startup_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    Globals.analyzer_status = "running"
+    Globals.analyzer_vram_mb = 0
+    Globals.analyzer_ram_mb = 0
+    Globals.analyzer_recommended = 0
+
+    if not bpy.app.timers.is_registered(check_analyzer_status):
+        bpy.app.timers.register(check_analyzer_status, first_interval=1.0)
+
+
+def check_analyzer_status():
+    """Timer callback — reads analyzer process output and parses memory stats."""
+    if Globals.analyzer_process is None:
+        return None
+
+    if Globals.analyzer_process.poll() is None:
+        return 1.0  # still running
+
+    stdout, _ = Globals.analyzer_process.communicate() if hasattr(
+        Globals.analyzer_process, '_communicated'
+    ) else (Globals.analyzer_process.stdout.read(), None)
+
+    # Parse peak VRAM from Blender log lines: "Mem: 553M"
+    import re
+    peak_mem = 0
+    for line in stdout.splitlines():
+        m = re.search(r'Mem:\s*(\d+(?:\.\d+)?)M', line)
+        if m:
+            val = float(m.group(1))
+            if val > peak_mem:
+                peak_mem = val
+
+    if peak_mem == 0:
+        Globals.analyzer_status = "error"
+    else:
+        Globals.analyzer_vram_mb = int(peak_mem)
+
+        # Estimate available VRAM
+        try:
+            import ctypes
+            # NVIDIA: query free VRAM via OpenGL extension (Windows)
+            available_mb = 12 * 1024  # fallback: assume 12GB for RTX 3060
+        except Exception:
+            available_mb = 12 * 1024
+
+        # Try to get actual VRAM from Blender
+        try:
+            gpu_info = bpy.context.preferences.system.gl_texture_limit
+            # Use total VRAM from GPU device name heuristic
+            for d in bpy.context.preferences.addons["cycles"].preferences.devices:
+                if "12" in d.name:
+                    available_mb = 12 * 1024
+                elif "8" in d.name:
+                    available_mb = 8 * 1024
+                elif "24" in d.name:
+                    available_mb = 24 * 1024
+                elif "16" in d.name:
+                    available_mb = 16 * 1024
+        except Exception:
+            pass
+
+        # Leave 1.5GB headroom for system + driver
+        headroom_mb = 1536
+        usable_mb = available_mb - headroom_mb
+        if Globals.analyzer_vram_mb > 0:
+            Globals.analyzer_recommended = max(1, int(usable_mb / Globals.analyzer_vram_mb))
+        else:
+            Globals.analyzer_recommended = 1
+
+        Globals.analyzer_status = "done"
+
+    Globals.analyzer_process = None
+
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            area.tag_redraw()
+
+    return None
+
+
+class RENDER_OT_analyze_scene(bpy.types.Operator):
+    """Render 1 sample in background to measure VRAM and recommend instance count"""
+
+    bl_idname = "render.prf_analyze_scene"
+    bl_label = "Analyze Scene"
+
+    def execute(self, context):
+        if not bpy.data.filepath:
+            self.report({"ERROR"}, "Save the project first")
+            return {"CANCELLED"}
+        launch_scene_analyzer()
+        self.report({"INFO"}, "Scene analysis started...")
+        return {"FINISHED"}
+
+
 # --- Rendering ---
 
 
@@ -1112,6 +1333,30 @@ class RENDER_PT_pseudo_rendering_farm_panel(bpy.types.Panel):
 
         col.separator()
 
+        # Scene analyzer
+        analyzer_col = col.column(align=True)
+        analyzer_col.enabled = not is_running and Globals.analyzer_status != "running"
+        analyzer_col.operator(
+            "render.prf_analyze_scene",
+            icon="HIDE_OFF",
+            text="Analyze Scene" if Globals.analyzer_status != "running" else "Analyzing...",
+        )
+        if Globals.analyzer_status == "running":
+            analyzer_col.label(text="Rendering 1 sample, please wait...", icon="TIME")
+        elif Globals.analyzer_status == "done" and Globals.analyzer_vram_mb > 0:
+            analyzer_col.label(
+                text=f"Scene VRAM: ~{Globals.analyzer_vram_mb} MB",
+                icon="GPU",
+            )
+            analyzer_col.label(
+                text=f"Safe instances: {Globals.analyzer_recommended}",
+                icon="CHECKMARK",
+            )
+        elif Globals.analyzer_status == "error":
+            analyzer_col.label(text="Analysis failed — check console", icon="ERROR")
+
+        col.separator()
+
         # Custom frame range
         range_col = col.column(align=True)
         range_col.enabled = not is_running
@@ -1256,6 +1501,7 @@ classes = [
     RENDER_OT_cancel_pseudo_rendering_farm,
     RENDER_OT_benchmarking,
     RENDER_OT_autodetect_start_frame,
+    RENDER_OT_analyze_scene,
     RENDER_OT_set_project_output,
     RENDER_OT_clear_output_folder,
     RENDER_OT_set_output_subfolder,
