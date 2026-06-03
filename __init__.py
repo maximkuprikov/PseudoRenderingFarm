@@ -61,6 +61,7 @@ class Globals:
     analyzer_vram_mb = 0
     analyzer_ram_mb = 0
     analyzer_recommended = 0
+    analyzer_start_time = 0
 
 
 def format_time(seconds):
@@ -731,6 +732,7 @@ def launch_scene_analyzer():
     Globals.analyzer_vram_mb = 0
     Globals.analyzer_ram_mb = 0
     Globals.analyzer_recommended = 0
+    Globals.analyzer_start_time = time.time()
 
     if not bpy.app.timers.is_registered(check_analyzer_status):
         bpy.app.timers.register(check_analyzer_status, first_interval=1.0)
@@ -742,14 +744,25 @@ def check_analyzer_status():
         return None
 
     if Globals.analyzer_process.poll() is None:
+        # Timeout after 3 minutes
+        if time.time() - Globals.analyzer_start_time > 180:
+            print("ParallelRender: Analyzer timed out, terminating")
+            Globals.analyzer_process.terminate()
+            Globals.analyzer_status = "error"
+            Globals.analyzer_process = None
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    area.tag_redraw()
+            return None
         return 1.0  # still running
 
-    stdout, _ = Globals.analyzer_process.communicate() if hasattr(
-        Globals.analyzer_process, '_communicated'
-    ) else (Globals.analyzer_process.stdout.read(), None)
+    # Process finished — read all output
+    try:
+        stdout = Globals.analyzer_process.stdout.read()
+    except Exception:
+        stdout = ""
 
     # Parse peak VRAM from Blender log lines: "Mem: 553M"
-    import re
     peak_mem = 0
     for line in stdout.splitlines():
         m = re.search(r'Mem:\s*(\d+(?:\.\d+)?)M', line)
@@ -758,43 +771,32 @@ def check_analyzer_status():
             if val > peak_mem:
                 peak_mem = val
 
+    print(f"ParallelRender: Analyzer peak Mem = {peak_mem} MB")
+    print(f"ParallelRender: Analyzer stdout (last 10 lines):")
+    for line in stdout.splitlines()[-10:]:
+        print(f"  {line}")
+
     if peak_mem == 0:
         Globals.analyzer_status = "error"
     else:
         Globals.analyzer_vram_mb = int(peak_mem)
 
-        # Estimate available VRAM
+        # Get total VRAM from GPU device name
+        available_mb = 12 * 1024  # fallback RTX 3060
         try:
-            import ctypes
-            # NVIDIA: query free VRAM via OpenGL extension (Windows)
-            available_mb = 12 * 1024  # fallback: assume 12GB for RTX 3060
-        except Exception:
-            available_mb = 12 * 1024
-
-        # Try to get actual VRAM from Blender
-        try:
-            gpu_info = bpy.context.preferences.system.gl_texture_limit
-            # Use total VRAM from GPU device name heuristic
             for d in bpy.context.preferences.addons["cycles"].preferences.devices:
-                if "12" in d.name:
-                    available_mb = 12 * 1024
-                elif "8" in d.name:
-                    available_mb = 8 * 1024
-                elif "24" in d.name:
-                    available_mb = 24 * 1024
-                elif "16" in d.name:
-                    available_mb = 16 * 1024
+                name = d.name
+                for size in ["24", "16", "12", "10", "8", "6"]:
+                    if size + "GB" in name or size + " GB" in name:
+                        available_mb = int(size) * 1024
+                        break
         except Exception:
             pass
 
         # Leave 1.5GB headroom for system + driver
         headroom_mb = 1536
         usable_mb = available_mb - headroom_mb
-        if Globals.analyzer_vram_mb > 0:
-            Globals.analyzer_recommended = max(1, int(usable_mb / Globals.analyzer_vram_mb))
-        else:
-            Globals.analyzer_recommended = 1
-
+        Globals.analyzer_recommended = max(1, int(usable_mb / Globals.analyzer_vram_mb))
         Globals.analyzer_status = "done"
 
     Globals.analyzer_process = None
