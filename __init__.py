@@ -508,6 +508,28 @@ def cleanup_userpref_dir():
         Globals.userpref_dir = ""
 
 
+def get_gpu_enable_expr():
+    """Returns a --python-expr string that forces Cycles to use GPU in background instances.
+    Reads the current device type from the active Blender session."""
+    try:
+        prefs = bpy.context.preferences.addons["cycles"].preferences
+        device_type = prefs.compute_device_type  # 'CUDA', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'
+        if device_type == "NONE":
+            return None
+        expr = (
+            "import bpy; "
+            "prefs = bpy.context.preferences.addons['cycles'].preferences; "
+            f"prefs.compute_device_type = '{device_type}'; "
+            f"prefs.get_devices_for_type('{device_type}'); "
+            "[setattr(d, 'use', True) for d in prefs.devices "
+            "if d.type != 'CPU']"
+        )
+        return expr
+    except Exception as e:
+        print(f"ParallelRender: Could not build GPU expr: {e}")
+        return None
+
+
 def get_process_priority_kwargs(reduce_priority=False):
     """Returns kwargs for subprocess.Popen to optionally launch with below-normal CPU priority."""
     if not reduce_priority:
@@ -672,7 +694,9 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
 
         for i in range(num_instances):
             factory = ["--factory-startup", "--disable-autoexec"] if scene.prf_load_user_addons else []
-            cmd = [blender_exe] + factory + ["-b", blend_path, "-a"]
+            gpu_expr = get_gpu_enable_expr()
+            gpu_args = ["--python-expr", gpu_expr] if gpu_expr else []
+            cmd = [blender_exe] + factory + gpu_args + ["-b", blend_path, "-a"]
             instance_env = get_factory_startup_env() if scene.prf_load_user_addons else get_env_for_instance(i)
 
             # Debug log
@@ -680,6 +704,15 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
             print(f"ParallelRender: Instance {i} BLENDER_USER_CONFIG: {instance_env.get('BLENDER_USER_CONFIG', 'NOT SET')}")
             userpref_in_dir = os.path.join(instance_env.get('BLENDER_USER_CONFIG', ''), 'userpref.blend')
             print(f"ParallelRender: Instance {i} userpref.blend exists: {os.path.isfile(userpref_in_dir)}")
+            # Debug: первый инстанс пишет лог в файл
+            if i == 0:
+                log_path = os.path.join(tempfile.gettempdir(), "prf_instance_0.log")
+                stdout_target = open(log_path, "w")
+                stderr_target = subprocess.STDOUT
+                print(f"ParallelRender: Instance 0 log -> {log_path}")
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
             try:
                 if is_system_balanced():
                     subrange = get_worker_subrange(
@@ -697,8 +730,8 @@ class RENDER_OT_pseudo_rendering_farm(bpy.types.Operator):
                     subprocess.Popen(
                         cmd,
                         env=instance_env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stdout=stdout_target,
+                        stderr=stderr_target,
                         **get_process_priority_kwargs(scene.prf_reduce_cpu_priority),
                     )
                 )
@@ -763,7 +796,9 @@ def launch_benchmark_iteration(context):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     for i in range(Globals.current_bench_instances):
         factory = ["--factory-startup", "--disable-autoexec"] if bpy.context.scene.prf_load_user_addons else []
-        cmd = [blender_exe] + factory + ["-b", blend_path, "-o", out_path, "-a"]
+        gpu_expr = get_gpu_enable_expr()
+        gpu_args = ["--python-expr", gpu_expr] if gpu_expr else []
+        cmd = [blender_exe] + factory + gpu_args + ["-b", blend_path, "-o", out_path, "-a"]
         instance_env = get_factory_startup_env() if bpy.context.scene.prf_load_user_addons else get_env_for_instance(i)
         if is_system_balanced():
             subrange = get_worker_subrange(
