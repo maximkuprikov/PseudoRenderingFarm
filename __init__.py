@@ -506,20 +506,35 @@ def cleanup_userpref_dir():
 
 
 def get_gpu_enable_expr():
-    """Returns a --python-expr string that forces Cycles to use GPU in background instances.
-    Reads the current device type from the active Blender session."""
+    """Returns a --python-expr string that forces Cycles to use GPU,
+    upgrades to OptiX if available, and enables Persistent Data."""
     try:
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        device_type = prefs.compute_device_type  # 'CUDA', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'
+        device_type = prefs.compute_device_type
+
+        # Auto-upgrade CUDA to OptiX on RTX cards
+        if device_type == "CUDA":
+            prefs.compute_device_type = "OPTIX"
+            prefs.get_devices_for_type("OPTIX")
+            optix_devices = [d for d in prefs.devices if d.type == "OPTIX"]
+            if optix_devices:
+                device_type = "OPTIX"
+                print("ParallelRender: Upgraded CUDA to OptiX for background instances")
+            else:
+                # OptiX not available, revert
+                prefs.compute_device_type = "CUDA"
+                print("ParallelRender: OptiX not available, keeping CUDA")
+
         if device_type == "NONE":
             return None
+
         expr = (
             "import bpy; "
             "prefs = bpy.context.preferences.addons['cycles'].preferences; "
             f"prefs.compute_device_type = '{device_type}'; "
             f"prefs.get_devices_for_type('{device_type}'); "
-            "[setattr(d, 'use', True) for d in prefs.devices "
-            "if d.type != 'CPU']"
+            "[setattr(d, 'use', True) for d in prefs.devices if d.type != 'CPU']; "
+            "bpy.context.scene.render.use_persistent_data = True"
         )
         return expr
     except Exception as e:
